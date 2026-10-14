@@ -16,12 +16,18 @@ from command_dispatcher import CommandDispatcher
 from database import DSN, init_db
 from firmware_dispatcher import FirmwareDispatcher
 from ocpp_forwarder import OcppForwarder
+from secrets_filter import RedactSecretsFilter
 from report_mailer import ReportMailer
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+# The ocpp library logs every received and sent message at INFO, which would put the
+# passwords, keys and PIN/PUK of a GetConfiguration response into the logs.  The
+# filter sits on the handlers (not the loggers) so it also covers the library's own logger.
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(RedactSecretsFilter())
 logger = logging.getLogger("ocpp-server")
 
 HOST = "0.0.0.0"

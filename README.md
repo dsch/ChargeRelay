@@ -268,7 +268,7 @@ On the **Stations** tab each card has a **Configure** button that opens the stat
 **Cautions**
 
 - A wrong value (network, backend address, security profile, timeouts) can make a station unreachable and need an on-site repair. The page asks for confirmation before saving.
-- Keys whose name looks like a secret (`AuthorizationKey`, `...Password`, `...Token`, `...PSK` and similar) are **never stored or shown**; they appear as *hidden* and can only be replaced.
+- Keys whose name looks like a secret (`AuthorizationKey`, `...Password`, `...Token`, `...PSK`, `...PIN`/`...PUK` and similar) are **never stored, shown or logged**; they appear as *hidden* and can only be replaced. Their values are masked as `*****` in the OCPP server log, and the value of a change request is removed from the command history once it has been sent. The name-based rule can miss a secret with an unusual name, so treat the container logs as sensitive anyway.
 - Like the rest of the API, these endpoints have no authentication: anyone who can reach the API or the web UI can change a station's settings.
 - Which keys exist and what they accept depends on the charger. The `SupportedFeatureProfiles` key shows which OCPP feature profiles (for example `FirmwareManagement`) the station claims to support.
 

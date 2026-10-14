@@ -17,6 +17,7 @@ import psycopg2
 from ocpp.messages import Call
 
 import charge_point as cp_module
+from secrets_filter import is_secret_key
 
 logger = logging.getLogger("command-dispatcher")
 
@@ -26,35 +27,11 @@ POLL_INTERVAL_SECONDS = 1
 STUCK_AFTER = timedelta(minutes=2)
 KEEP_HISTORY = timedelta(days=30)
 
-# Key names that may hold secrets (backend credentials, Wi-Fi passphrases ...).
-# The API is unauthenticated, so their values are never stored or served.
-# A secret-like word anywhere in the name hides the value.  Substring matching
-# is used on purpose: word splitting cannot recognise run-together names such as
-# "WPAPSK" or "authkey", and a leaked credential is worse than a hidden number.
-# "Keys" (plural, e.g. GetConfigurationMaxKeys) is a count, not a secret.
-_SECRET_PATTERN = re.compile(
-    r"key|pass(?:word|wd|code|phrase)|secret|token|psk|credential"
-    r"|(?:^|[._\-])(?:pin|puk)(?:$|[._\-])",
-    re.IGNORECASE,
-)
-# CamelCase "SimPin" / "SimPuk": must stay case-sensitive, otherwise "Spinner",
-# "Shipping" and "WebSocketPingInterval" would match.
-_SECRET_CAMEL = re.compile(r"[a-z](?:Pin|Puk)(?:$|[A-Z])")
-_NOT_SECRET = re.compile(r"keys", re.IGNORECASE)
-
 _MAX_VALUE = 500
 # OCPP limits keys to 50 characters, but real chargers use longer vendor keys
 # (e.g. the eBox: "periphery.uiboard.bluetooth_button_pressed_duration").  Truncating
 # would merge distinct keys, so keep them whole up to a generous cap.
 _MAX_KEY = 128
-
-
-def is_secret_key(key: str) -> bool:
-    """True if the value of this configuration key must never be stored or served."""
-    # Drop the harmless plural before matching so "MaxKeys" is not flagged, while
-    # "AuthKeys" style names still match via their other words.
-    cleaned = _NOT_SECRET.sub("", key)
-    return bool(_SECRET_PATTERN.search(cleaned) or _SECRET_CAMEL.search(cleaned))
 
 
 def _now() -> str:
@@ -99,15 +76,33 @@ class CommandDispatcher:
                 detail: str | None = None) -> None:
         conn = self._connect()
         try:
-            conn.cursor().execute(
+            cur = conn.cursor()
+            cur.execute(
                 "UPDATE station_commands SET status = %s, result = %s, detail = %s, "
-                "updated_at = %s WHERE id = %s",
+                "updated_at = %s WHERE id = %s RETURNING command, params",
                 (status, json.dumps(result) if result is not None else None,
                  detail, _now(), cmd_id),
             )
+            row = cur.fetchone()
+            if row:
+                self._scrub_secret_params(cur, cmd_id, row[0], row[1])
             conn.commit()
         finally:
             conn.close()
+
+    @staticmethod
+    def _scrub_secret_params(cur, cmd_id: int, command: str, params_json: str | None) -> None:
+        """Drop the value of a secret key from a finished command (it is needed only to send it)."""
+        if command != "ChangeConfiguration" or not params_json:
+            return
+        try:
+            params = json.loads(params_json)
+        except ValueError:
+            return
+        if is_secret_key(str(params.get("key", ""))) and params.get("value") is not None:
+            params["value"] = None
+            cur.execute("UPDATE station_commands SET params = %s WHERE id = %s",
+                        (json.dumps(params), cmd_id))
 
     def _store_configuration(self, cp_id: str, items: list[dict]) -> None:
         """Replace the cached configuration of a station in one transaction."""
@@ -179,6 +174,15 @@ class CommandDispatcher:
                 "DELETE FROM station_commands WHERE updated_at < %s",
                 ((now - KEEP_HISTORY).isoformat(),),
             )
+            # Finished ChangeConfiguration rows may still hold a secret value (rows stored
+            # before values were scrubbed on completion, or a crash between send and scrub).
+            cur.execute("""
+                SELECT id, command, params FROM station_commands
+                WHERE command = 'ChangeConfiguration' AND status IN ('done', 'failed')
+                  AND params IS NOT NULL AND params NOT LIKE '%%"value": null%%'
+            """)
+            for cmd_id, command, params_json in cur.fetchall():
+                self._scrub_secret_params(cur, cmd_id, command, params_json)
             conn.commit()
         finally:
             conn.close()

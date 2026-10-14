@@ -22,6 +22,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from database import db, db_write, row_to_dict
 from models import StationCommandCreate
+from secrets_filter import is_secret_key
 from routers.stations import DEFAULT_HEARTBEAT_SECONDS, ONLINE_FACTOR, _parse_utc
 
 router = APIRouter(prefix="/api/stations")
@@ -34,9 +35,16 @@ _FW_TERMINAL = ("Installed", "DownloadFailed", "InstallationFailed", "failed")
 
 
 def _command_row(row: dict) -> dict:
-    """Decode the JSON columns of a station_commands row for the response."""
+    """Decode the JSON columns of a station_commands row for the response.
+
+    The value of a ChangeConfiguration for a secret-looking key is never returned,
+    not even for rows stored before the dispatcher started clearing it.
+    """
     row["params"] = json.loads(row["params"]) if row["params"] else None
     row["result"] = json.loads(row["result"]) if row["result"] else None
+    params = row["params"]
+    if row["command"] == "ChangeConfiguration" and params and is_secret_key(str(params.get("key", ""))):
+        params["value"] = None
     return row
 
 
