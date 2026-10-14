@@ -64,6 +64,7 @@
             <span class="station-card__id mono muted">{{ s.id }}</span>
           </div>
           <div class="station-card__badges">
+            <button class="btn btn--sm btn--ghost" @click="$emit('configure', s)">{{ t('stationConfig.configure') }}</button>
             <span v-if="s.firmware" class="fw-badge mono" :title="t('stations.firmware')">FW {{ s.firmware }}</span>
             <span class="status" :class="s.online ? 'status--active' : 'status--done'">
               {{ s.online ? t('stations.online') : t('stations.offline') }}
@@ -218,6 +219,7 @@ defineProps<{
 }>()
 
 const emit = defineEmits<{
+  configure: [station: Station]
   updateFirmware: [station: Station]
   uploadFile: [payload: { file: File; note: string }]
   deleteFile: [file: FirmwareFile]

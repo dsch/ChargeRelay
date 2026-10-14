@@ -33,6 +33,7 @@ Most home and fleet charging stations ship with a vendor cloud app that locks yo
 - Hardware identity reported at boot: serial numbers, meter type, ICCID/IMSI
 - Connection details: last seen, connected since, remote address, heartbeat interval
 - Usage per station: active sessions, sessions and kWh of the last 30 days, total kWh
+- **Station configuration** — read and change a station's OCPP configuration keys, reset it, or ask it to resend a message. See [Station Configuration](#station-configuration)
 - **Firmware update** — upload a firmware file in the UI, ChargeRelay hosts it and sends an OCPP `UpdateFirmware` to the station; progress (downloading, installing, installed) is shown on the station card. See [Firmware Updates](#firmware-updates)
 
 ### Session History
@@ -252,6 +253,24 @@ FW_MAX_UPLOAD_MB=100
 - Chargers differ: some only accept `https://` or `ftp://` URLs, some ignore the scheduled time, and some never send `Installed`. If your charger needs HTTPS, put ChargeRelay behind a TLS reverse proxy.
 - The download link contains a random token and needs no password (the charger cannot send one). Deleting the file revokes the link.
 - An update with no final status after 2 hours is marked as failed.
+
+---
+
+## Station Configuration
+
+On the **Stations** tab each card has a **Configure** button that opens the station's configuration page. It uses the OCPP 1.6 messages `GetConfiguration`, `ChangeConfiguration`, `Reset` and `TriggerMessage`.
+
+- **Read from station** fetches every configuration key the station exposes. Nothing is sent to a charger unless you click; the result is cached, so the last values stay visible while the station is offline.
+- **Edit** a key (not read-only ones) and save. The station answers *Accepted*, *Rejected*, *Not supported* or *Reboot required*; for the last one a **Reset station** shortcut appears.
+- **Reset** (Soft/Hard) restarts the station. It is refused while a charging session or a firmware update is running.
+- **Request message** asks the station to resend `BootNotification`, `StatusNotification`, `MeterValues`, `Heartbeat` and similar.
+
+**Cautions**
+
+- A wrong value (network, backend address, security profile, timeouts) can make a station unreachable and need an on-site repair. The page asks for confirmation before saving.
+- Keys whose name looks like a secret (`AuthorizationKey`, `...Password`, `...Token`, `...PSK` and similar) are **never stored or shown**; they appear as *hidden* and can only be replaced.
+- Like the rest of the API, these endpoints have no authentication: anyone who can reach the API or the web UI can change a station's settings.
+- Which keys exist and what they accept depends on the charger. The `SupportedFeatureProfiles` key shows which OCPP feature profiles (for example `FirmwareManagement`) the station claims to support.
 
 ---
 

@@ -12,6 +12,7 @@ import websockets
 
 import charge_point as cp_module
 from charge_point import ChargePoint
+from command_dispatcher import CommandDispatcher
 from database import DSN, init_db
 from firmware_dispatcher import FirmwareDispatcher
 from ocpp_forwarder import OcppForwarder
@@ -80,6 +81,10 @@ async def main() -> None:
     # Send firmware updates queued by the API to the connected stations.
     dispatcher = FirmwareDispatcher(DSN)
     asyncio.create_task(dispatcher.run())
+
+    # Send configuration / reset / trigger commands queued by the API.
+    command_dispatcher = CommandDispatcher(DSN)
+    asyncio.create_task(command_dispatcher.run())
 
     logger.info("OCPP 1.6 server listening on ws://%s:%d", HOST, PORT)
     async with websockets.serve(

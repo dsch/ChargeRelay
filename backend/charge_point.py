@@ -11,6 +11,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
+from ocpp.exceptions import TypeConstraintViolationError
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as CP
 from ocpp.v16 import call, call_result
@@ -45,6 +46,35 @@ _TOUCH_THROTTLE_SECONDS = 10
 
 # OCPP 1.6 CiString50 – everything the station sends is untrusted input.
 _MAX_STR = 50
+
+
+def _as_bool(value) -> bool:
+    """Read a boolean that a non-compliant charger may send as a string."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value)
+
+
+def _normalise_configuration(payload: dict) -> dict:
+    """Turn a lenient GetConfiguration payload into snake_case result fields.
+
+    Keys are kept at their full length here; the caller stores them.  Entries
+    without a usable key are dropped.
+    """
+    items = []
+    for entry in payload.get("configurationKey") or []:
+        if not isinstance(entry, dict) or not entry.get("key"):
+            continue
+        value = entry.get("value")
+        items.append({
+            "key": str(entry["key"]),
+            "readonly": _as_bool(entry.get("readonly", False)),
+            "value": None if value is None else str(value),
+        })
+    return {
+        "configuration_key": items,
+        "unknown_key": [str(k) for k in (payload.get("unknownKey") or [])],
+    }
 
 
 def _clip(value) -> str | None:
@@ -125,6 +155,49 @@ class ChargePoint(CP):
                 retrieve_date=datetime.now(timezone.utc).isoformat(),
                 retries=retries,
                 retry_interval=retry_interval,
+            ),
+            suppress=False,
+        )
+
+    # The calls below use suppress=False so a CallError raises instead of being
+    # swallowed by the library, and return the CallResult payload.
+
+    async def get_configuration(self):
+        """GetConfiguration without a key filter: returns every key the station exposes.
+
+        Some chargers (e.g. the innogy eBox) break the schema: "readonly" arrives
+        as the string "false", and vendor keys can exceed the 50-character limit.
+        The ocpp library then rejects the whole response, so for this one command
+        the raw payload is taken from the validation error and normalised.  Any
+        other violation still raises, and every other command stays strictly
+        validated.
+        """
+        try:
+            return await self.call(call.GetConfigurationPayload(), suppress=False)
+        except TypeConstraintViolationError as exc:
+            message = (exc.details or {}).get("ocpp_message")
+            payload = getattr(message, "payload", None)
+            if not isinstance(payload, dict):
+                raise
+            logger.warning("[%s] Non-compliant GetConfiguration response (%s) – normalising",
+                           self._cp_id, (exc.details or {}).get("cause", "")[:120])
+            return call_result.GetConfigurationPayload(**_normalise_configuration(payload))
+
+    async def change_configuration(self, key: str, value: str):
+        """ChangeConfiguration; result.status is Accepted/Rejected/RebootRequired/NotSupported."""
+        return await self.call(
+            call.ChangeConfigurationPayload(key=key, value=value), suppress=False
+        )
+
+    async def reset(self, reset_type: str):
+        """Reset ('Soft' or 'Hard'); result.status is Accepted/Rejected."""
+        return await self.call(call.ResetPayload(type=reset_type), suppress=False)
+
+    async def trigger_message(self, requested_message: str, connector_id: int | None = None):
+        """TriggerMessage; result.status is Accepted/Rejected/NotImplemented."""
+        return await self.call(
+            call.TriggerMessagePayload(
+                requested_message=requested_message, connector_id=connector_id
             ),
             suppress=False,
         )

@@ -70,13 +70,30 @@
     </template>
 
     <!-- ── Stationen ───────────────────────────────────────────────────── -->
-    <template v-if="activeTab === 'stations'">
+    <template v-if="activeTab === 'stations' && configStation">
+      <StationConfig
+        :station="configStation"
+        :config="stationConfig"
+        :history="configHistory"
+        :busy="configBusy"
+        :reading="configReading"
+        :rebootNeeded="configRebootNeeded"
+        :notice="configNotice"
+        @back="closeConfig"
+        @refresh="readConfig"
+        @changeKey="changeConfigKey"
+        @reset="resetStation"
+        @trigger="triggerStationMessage"
+      />
+    </template>
+    <template v-else-if="activeTab === 'stations'">
       <StationsSection
         :loading="stationsLoading"
         :stations="stations"
         :files="firmwareFiles"
         :uploadPercent="uploadPercent"
         :panelError="firmwarePanelError"
+        @configure="openConfig"
         @updateFirmware="openFirmwareModal"
         @uploadFile="uploadFirmwareFile"
         @deleteFile="deleteFirmwareFile"
@@ -130,7 +147,10 @@
 </template>
 
 <script setup lang="ts">
-import type { Vehicle, ActiveSession, Session, Report, Stats, Station, FirmwareFile } from '~/types'
+import type {
+  Vehicle, ActiveSession, Session, Report, Stats, Station, FirmwareFile,
+  StationConfig as StationConfigData, StationCommand,
+} from '~/types'
 
 const { t } = useLocale()
 
@@ -199,6 +219,19 @@ const stationsLoading = ref(false)
 const firmwareFiles = ref<FirmwareFile[]>([])
 const uploadPercent = ref<number | null>(null)
 const firmwarePanelError = ref('')
+// Station configuration page
+const configStationId = ref<string | null>(null)
+const stationConfig = ref<StationConfigData | null>(null)
+const configHistory = ref<StationCommand[]>([])
+const configBusy = ref(false)
+const configReading = ref(false)
+const configRebootNeeded = ref(false)
+const configNotice = ref<{ kind: 'ok' | 'error'; text: string } | null>(null)
+// Looked up by id so the page follows the 30 s station refresh (online badge etc.).
+const configStation = computed(() =>
+  stations.value.find(s => s.id === configStationId.value) ?? null
+)
+
 const firmwareStation = ref<Station | null>(null)
 const firmwareSaving = ref(false)
 const firmwareError = ref('')
@@ -307,6 +340,134 @@ async function deleteFirmwareFile(f: FirmwareFile) {
   }
 }
 
+// ── Station configuration ──────────────────────────────────────────────────
+
+function configErrorMessage(status: number | undefined, detail: unknown): string {
+  // FastAPI sends a string for our own errors and a list of objects for schema errors.
+  const text = typeof detail === 'string'
+    ? detail
+    : Array.isArray(detail) ? detail.map((d: any) => d?.msg).filter(Boolean).join('; ') : ''
+  switch (status) {
+    case 404: return t('stationConfig.errorNotFound')
+    case 409: return text === 'Station is offline'
+      ? t('stationConfig.errorOffline')
+      : t('stationConfig.errorConflict', { detail: text })
+    case 422: return Array.isArray(detail) && detail.some((d: any) => d?.loc?.includes('key') && d?.type === 'string_too_long')
+      ? t('stationConfig.errorKeyTooLong')
+      : t('stationConfig.errorValidation', { detail: text })
+    case 429: return t('stationConfig.errorTooMany')
+    default:  return t('stationConfig.errorGeneric')
+  }
+}
+
+async function fetchConfigData() {
+  const id = configStationId.value
+  if (!id) return
+  try {
+    const [cfg, hist] = await Promise.all([
+      $fetch<StationConfigData>(`${API}/api/stations/${id}/config`),
+      $fetch<StationCommand[]>(`${API}/api/stations/${id}/commands`, { query: { limit: 10 } }),
+    ])
+    if (configStationId.value === id) {
+      stationConfig.value = cfg
+      configHistory.value = hist
+    }
+  } catch { /* keep what is shown; the next action refreshes it */ }
+}
+
+async function openConfig(s: Station) {
+  configStationId.value = s.id
+  stationConfig.value = null
+  configHistory.value = []
+  configRebootNeeded.value = false
+  configNotice.value = null
+  await fetchConfigData()
+}
+
+function closeConfig() {
+  configStationId.value = null
+  fetchStations()
+}
+
+/** Queue a command and poll it every second until the OCPP server has finished it (max 60 s). */
+async function runCommand(body: Record<string, unknown>): Promise<StationCommand | null> {
+  const id = configStationId.value
+  if (!id) return null
+  configNotice.value = null
+  try {
+    let cmd = await $fetch<StationCommand>(`${API}/api/stations/${id}/commands`, { method: 'POST', body })
+    for (let i = 0; i < 60 && (cmd.status === 'queued' || cmd.status === 'sending'); i++) {
+      await new Promise(r => setTimeout(r, 1000))
+      if (configStationId.value !== id) return null          // user left the page
+      cmd = await $fetch<StationCommand>(`${API}/api/stations/${id}/commands/${cmd.id}`)
+    }
+    if (cmd.status === 'queued' || cmd.status === 'sending') {
+      configNotice.value = { kind: 'error', text: t('stationConfig.errorTimeout') }
+      return null
+    }
+    return cmd
+  } catch (e: any) {
+    configNotice.value = {
+      kind: 'error',
+      text: configErrorMessage(e?.response?.status, e?.data?.detail),
+    }
+    return null
+  }
+}
+
+/** Turn a finished command into a message; returns true when the station accepted it. */
+function reportCommand(cmd: StationCommand): boolean {
+  if (cmd.status === 'failed') {
+    configNotice.value = { kind: 'error', text: cmd.detail || t('stationConfig.errorGeneric') }
+    return false
+  }
+  const result = cmd.result?.status
+  if (cmd.command === 'GetConfiguration') {
+    configNotice.value = { kind: 'ok', text: t('stationConfig.readDone', { count: cmd.result?.count ?? 0 }) }
+    return true
+  }
+  const known = ['Accepted', 'Rejected', 'RebootRequired', 'NotSupported', 'NotImplemented']
+  const text = result && known.includes(result) ? t(`stationConfig.result.${result}`) : (result ?? '')
+  const ok = result === 'Accepted' || result === 'RebootRequired'
+  configNotice.value = { kind: ok ? 'ok' : 'error', text }
+  if (result === 'RebootRequired') configRebootNeeded.value = true
+  return ok
+}
+
+async function runAndRefresh(body: Record<string, unknown>) {
+  configBusy.value = true
+  try {
+    const cmd = await runCommand(body)
+    if (cmd) reportCommand(cmd)
+    await fetchConfigData()
+  } finally {
+    configBusy.value = false
+    configReading.value = false
+  }
+}
+
+async function readConfig() {
+  configReading.value = true
+  configRebootNeeded.value = false
+  await runAndRefresh({ command: 'GetConfiguration' })
+}
+
+async function changeConfigKey({ key, value }: { key: string; value: string }) {
+  await runAndRefresh({ command: 'ChangeConfiguration', key, value })
+}
+
+async function resetStation(type: 'Soft' | 'Hard') {
+  configRebootNeeded.value = false
+  await runAndRefresh({ command: 'Reset', type })
+}
+
+async function triggerStationMessage({ message, connectorId }: { message: string; connectorId: number | null }) {
+  await runAndRefresh({
+    command: 'TriggerMessage', message,
+    ...(connectorId !== null ? { connector_id: connectorId } : {}),
+  })
+}
+
 function openFirmwareModal(s: Station) {
   firmwareError.value = ''
   firmwareStation.value = s
@@ -402,6 +563,7 @@ async function switchToReports() {
 
 async function switchToStations() {
   activeTab.value = 'stations'
+  configStationId.value = null     // the tab button always leads back to the list
   await Promise.all([fetchStations(), fetchFirmwareFiles()])
 }
 

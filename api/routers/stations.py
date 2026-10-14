@@ -55,7 +55,8 @@ def get_stations():
             SELECT id, vendor, model, firmware,
                    serial_number, box_serial_number, meter_serial_number,
                    meter_type, iccid, imsi,
-                   heartbeat_interval, connected_at, remote_address, last_seen
+                   heartbeat_interval, connected_at, remote_address, last_seen,
+                   config_fetched_at
             FROM charge_points
             ORDER BY id
         """)

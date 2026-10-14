@@ -228,6 +228,44 @@ def init_db() -> None:
             WHERE status NOT IN ('Installed', 'DownloadFailed', 'InstallationFailed', 'failed')
         """)
 
+        # Commands the UI asks the OCPP server to send to a station (the API only
+        # queues a row; backend/command_dispatcher.py sends it and stores the result).
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS station_commands (
+                id              SERIAL PRIMARY KEY,
+                charge_point_id TEXT NOT NULL,
+                command         TEXT NOT NULL,
+                params          TEXT,
+                status          TEXT NOT NULL,
+                result          TEXT,
+                detail          TEXT,
+                requested_at    TEXT NOT NULL,
+                requested_from  TEXT,
+                updated_at      TEXT NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS station_commands_cp_idx
+            ON station_commands (charge_point_id, id DESC)
+        """)
+
+        # Last known configuration keys per station.  Secrets are never stored:
+        # masked keys keep value = NULL.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS station_config (
+                charge_point_id TEXT    NOT NULL,
+                key             TEXT    NOT NULL,
+                value           TEXT,
+                readonly        BOOLEAN NOT NULL DEFAULT FALSE,
+                masked          BOOLEAN NOT NULL DEFAULT FALSE,
+                updated_at      TEXT    NOT NULL,
+                PRIMARY KEY (charge_point_id, key)
+            )
+        """)
+        cur.execute("""
+            ALTER TABLE charge_points ADD COLUMN IF NOT EXISTS config_fetched_at TEXT
+        """)
+
         # Migration: add last_sent for mail delivery tracking.
         cur.execute("""
             ALTER TABLE report_deliveries

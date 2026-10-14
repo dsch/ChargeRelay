@@ -114,6 +114,30 @@ export interface FirmwareUpdate {
   updated_at: string
 }
 
+export interface ConfigItem {
+  key: string
+  value: string | null
+  readonly: boolean
+  masked: boolean
+}
+
+export interface StationConfig {
+  fetched_at: string | null
+  items: ConfigItem[]
+}
+
+export interface StationCommand {
+  id: number
+  charge_point_id: string
+  command: 'GetConfiguration' | 'ChangeConfiguration' | 'Reset' | 'TriggerMessage'
+  params: Record<string, string | number> | null
+  status: 'queued' | 'sending' | 'done' | 'failed'
+  result: { status?: string; count?: number } | null
+  detail: string | null
+  requested_at: string
+  updated_at: string
+}
+
 export interface Station {
   id: string
   vendor: string | null
@@ -133,6 +157,7 @@ export interface Station {
   online: boolean
   connectors: StationConnector[]
   firmware_update: FirmwareUpdate | null
+  config_fetched_at: string | null
   stats: StationStats
 }
 

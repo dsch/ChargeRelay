@@ -76,6 +76,54 @@ class FirmwareUpdateCreate(BaseModel):
     file_id: int
 
 
+COMMANDS = {"GetConfiguration", "ChangeConfiguration", "Reset", "TriggerMessage"}
+RESET_TYPES = {"Soft", "Hard"}
+# OCPP 1.6 MessageTrigger values.
+TRIGGER_MESSAGES = {
+    "BootNotification", "DiagnosticsStatusNotification", "FirmwareStatusNotification",
+    "Heartbeat", "MeterValues", "StatusNotification",
+}
+
+
+class StationCommandCreate(BaseModel):
+    """Payload for queueing a command to a station; params depend on the command."""
+    command: str
+    key: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    value: Optional[str] = Field(default=None, max_length=500)
+    type: Optional[str] = None
+    message: Optional[str] = None
+    connector_id: Optional[int] = Field(default=None, ge=0, le=1000)
+
+    @field_validator("command")
+    @classmethod
+    def validate_command(cls, v: str) -> str:
+        """Reject commands that are not supported."""
+        if v not in COMMANDS:
+            raise ValueError(f"command must be one of: {', '.join(sorted(COMMANDS))}")
+        return v
+
+    def params(self) -> dict:
+        """Return only the parameters that belong to the command, or raise ValueError."""
+        if self.command == "ChangeConfiguration":
+            # OCPP caps keys at 50 characters and the ocpp library refuses to send
+            # longer ones.  Such vendor keys can be read but not changed over OCPP.
+            if self.key is None or self.value is None:
+                raise ValueError("ChangeConfiguration needs 'key' and 'value'")
+            return {"key": self.key, "value": self.value}
+        if self.command == "Reset":
+            if self.type not in RESET_TYPES:
+                raise ValueError(f"type must be one of: {', '.join(sorted(RESET_TYPES))}")
+            return {"type": self.type}
+        if self.command == "TriggerMessage":
+            if self.message not in TRIGGER_MESSAGES:
+                raise ValueError(f"message must be one of: {', '.join(sorted(TRIGGER_MESSAGES))}")
+            params: dict = {"message": self.message}
+            if self.connector_id is not None:
+                params["connector_id"] = self.connector_id
+            return params
+        return {}
+
+
 class ReportCreate(BaseModel):
     """Payload for creating a new report."""
     name: str
