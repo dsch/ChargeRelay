@@ -18,6 +18,7 @@
       @toSessions="switchToSessions"
       @toVehicles="switchToVehicles"
       @toReports="switchToReports"
+      @toStations="switchToStations"
     />
 
     <!-- ── Übersicht ───────────────────────────────────────────────────── -->
@@ -68,6 +69,11 @@
       />
     </template>
 
+    <!-- ── Stationen ───────────────────────────────────────────────────── -->
+    <template v-if="activeTab === 'stations'">
+      <StationsSection :loading="stationsLoading" :stations="stations" />
+    </template>
+
     <!-- ── Fahrzeug-Formular (Modal) ───────────────────────────────────── -->
     <VehicleFormModal
       v-if="showVehicleForm"
@@ -104,7 +110,7 @@
 </template>
 
 <script setup lang="ts">
-import type { Vehicle, ActiveSession, Session, Report, Stats } from '~/types'
+import type { Vehicle, ActiveSession, Session, Report, Stats, Station } from '~/types'
 
 const API = ''
 
@@ -142,7 +148,7 @@ async function onAuthenticated() {
 
 // ── State ──────────────────────────────────────────────────────────────────
 
-const activeTab = ref<'overview' | 'sessions' | 'vehicles' | 'reports'>('overview')
+const activeTab = ref<'overview' | 'sessions' | 'vehicles' | 'reports' | 'stations'>('overview')
 
 const activeSessions = ref<ActiveSession[]>([])
 const activeLoading = ref(true)
@@ -164,6 +170,9 @@ const reportsLoading = ref(false)
 const showReportForm = ref(false)
 const savingReport = ref(false)
 const editingReport = ref<Report | null>(null)
+
+const stations = ref<Station[]>([])
+const stationsLoading = ref(false)
 
 const stats = ref<Stats | null>(null)
 const statsLoading = ref(true)   // true = zeigt Loading-Zustand beim ersten Rendern
@@ -193,6 +202,14 @@ async function fetchReports() {
     reports.value = await $fetch<Report[]>(`${API}/api/reports`)
   } catch { reports.value = [] }
   finally { reportsLoading.value = false }
+}
+
+async function fetchStations() {
+  stationsLoading.value = true
+  try {
+    stations.value = await $fetch<Station[]>(`${API}/api/stations`)
+  } catch { stations.value = [] }
+  finally { stationsLoading.value = false }
 }
 
 async function fetchStats() {
@@ -263,6 +280,11 @@ async function switchToVehicles() {
 async function switchToReports() {
   activeTab.value = 'reports'
   await Promise.all([fetchReports(), fetchVehicles()])
+}
+
+async function switchToStations() {
+  activeTab.value = 'stations'
+  await fetchStations()
 }
 
 // ── Fahrzeug-CRUD ──────────────────────────────────────────────────────────
@@ -413,7 +435,15 @@ onMounted(async () => {
   }
 })
 const interval = setInterval(refresh, 90_000)
-onUnmounted(() => clearInterval(interval))
+// Station online state flips after ~90 s without a frame, so poll faster while
+// that tab is visible.
+const stationsInterval = setInterval(() => {
+  if (authenticated.value && activeTab.value === 'stations') fetchStations()
+}, 30_000)
+onUnmounted(() => {
+  clearInterval(interval)
+  clearInterval(stationsInterval)
+})
 </script>
 
 <style>

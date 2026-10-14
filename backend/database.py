@@ -67,6 +67,37 @@ def init_db() -> None:
             )
         """)
 
+        # Migration: hardware identity and connection info for the Stations tab.
+        for column, col_type in (
+            ("serial_number",       "TEXT"),
+            ("box_serial_number",   "TEXT"),
+            ("meter_serial_number", "TEXT"),
+            ("meter_type",          "TEXT"),
+            ("iccid",               "TEXT"),
+            ("imsi",                "TEXT"),
+            ("heartbeat_interval",  "INTEGER"),
+            ("connected_at",        "TEXT"),
+            ("remote_address",      "TEXT"),
+        ):
+            cur.execute(
+                f"ALTER TABLE charge_points ADD COLUMN IF NOT EXISTS {column} {col_type}"
+            )
+
+        # Latest StatusNotification per connector (connector 0 = the station itself).
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS connector_status (
+                charge_point_id   TEXT    NOT NULL,
+                connector_id      INTEGER NOT NULL,
+                status            TEXT,
+                error_code        TEXT,
+                info              TEXT,
+                vendor_error_code TEXT,
+                status_timestamp  TEXT,
+                updated_at        TEXT,
+                PRIMARY KEY (charge_point_id, connector_id)
+            )
+        """)
+
         # One row per charging session (start ↔ stop pair).
         cur.execute("""
             CREATE TABLE IF NOT EXISTS sessions (

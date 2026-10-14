@@ -8,6 +8,7 @@ and optionally forwards raw frames to configured OCPP relay targets.
 """
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 from ocpp.routing import on
@@ -23,6 +24,23 @@ logger = logging.getLogger("ocpp-server")
 # can import without circular dependencies.
 forwarder = None
 
+# Heartbeat interval (seconds) announced to charge points in BootNotification.
+# The API derives the online/offline state from it, so both must agree.
+HEARTBEAT_INTERVAL = 30
+
+# Minimum seconds between "last_seen" refreshes triggered by ordinary frames.
+_TOUCH_THROTTLE_SECONDS = 10
+
+# OCPP 1.6 CiString50 – everything the station sends is untrusted input.
+_MAX_STR = 50
+
+
+def _clip(value) -> str | None:
+    """Return *value* as a string capped at the OCPP CiString50 length, or None."""
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))[:_MAX_STR]
+
 
 class ChargePoint(CP):
     """OCPP 1.6 charge-point handler – one instance per WebSocket connection."""
@@ -30,6 +48,10 @@ class ChargePoint(CP):
     def __init__(self, cp_id: str, websocket):
         super().__init__(cp_id, websocket)
         self._cp_id = cp_id
+        remote = getattr(websocket, "remote_address", None)
+        self._remote_address = f"{remote[0]}:{remote[1]}" if remote else None
+        self._connected_at = datetime.now(timezone.utc).isoformat()
+        self._last_touch = 0.0
         # Maps connector_id → active session row id.
         self._active_sessions: dict[int, int] = {}
         # Last RFID tag accepted via Authorize (used as fallback when StartTransaction
@@ -42,9 +64,35 @@ class ChargePoint(CP):
 
     async def route_message(self, raw_msg: str):
         """Forward every raw OCPP frame to relay targets before processing it locally."""
+        self._touch()
         if forwarder is not None:
             asyncio.ensure_future(forwarder.forward(self._cp_id, raw_msg))
         return await super().route_message(raw_msg)
+
+    def _touch(self) -> None:
+        """Refresh last_seen / connection info for a known station (throttled).
+
+        UPDATE only – a connection that never sends BootNotification must not
+        create a charge_points row.
+        """
+        now_mono = time.monotonic()
+        if now_mono - self._last_touch < _TOUCH_THROTTLE_SECONDS:
+            return
+        self._last_touch = now_mono
+        try:
+            with db() as conn:
+                conn.cursor().execute(
+                    """
+                    UPDATE charge_points
+                    SET last_seen = %s, connected_at = %s, remote_address = %s
+                    WHERE id = %s
+                    """,
+                    (datetime.now(timezone.utc).isoformat(),
+                     self._connected_at, self._remote_address, self._cp_id),
+                )
+        except Exception as exc:
+            # Bookkeeping must never break OCPP message handling.
+            logger.warning("[%s] last_seen update failed: %s", self._cp_id, exc)
 
     # -----------------------------------------------------------------------
     # BootNotification
@@ -56,6 +104,12 @@ class ChargePoint(CP):
         charge_point_model: str,
         charge_point_vendor: str,
         firmware_version: str | None = None,
+        charge_point_serial_number: str | None = None,
+        charge_box_serial_number: str | None = None,
+        meter_serial_number: str | None = None,
+        meter_type: str | None = None,
+        iccid: str | None = None,
+        imsi: str | None = None,
         **kwargs,
     ):
         """Register or update the charge point in the database and accept the boot."""
@@ -63,22 +117,39 @@ class ChargePoint(CP):
         with db() as conn:
             cur = conn.cursor()
             cur.execute("""
-                INSERT INTO charge_points (id, model, vendor, firmware, last_seen)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO charge_points
+                    (id, model, vendor, firmware, last_seen,
+                     serial_number, box_serial_number, meter_serial_number,
+                     meter_type, iccid, imsi,
+                     heartbeat_interval, connected_at, remote_address)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(id) DO UPDATE SET
-                    model     = EXCLUDED.model,
-                    vendor    = EXCLUDED.vendor,
-                    firmware  = EXCLUDED.firmware,
-                    last_seen = EXCLUDED.last_seen
-            """, (self._cp_id, charge_point_model, charge_point_vendor,
-                  firmware_version, now))
+                    model               = EXCLUDED.model,
+                    vendor              = EXCLUDED.vendor,
+                    firmware            = EXCLUDED.firmware,
+                    last_seen           = EXCLUDED.last_seen,
+                    serial_number       = EXCLUDED.serial_number,
+                    box_serial_number   = EXCLUDED.box_serial_number,
+                    meter_serial_number = EXCLUDED.meter_serial_number,
+                    meter_type          = EXCLUDED.meter_type,
+                    iccid               = EXCLUDED.iccid,
+                    imsi                = EXCLUDED.imsi,
+                    heartbeat_interval  = EXCLUDED.heartbeat_interval,
+                    connected_at        = EXCLUDED.connected_at,
+                    remote_address      = EXCLUDED.remote_address
+            """, (self._cp_id, _clip(charge_point_model), _clip(charge_point_vendor),
+                  _clip(firmware_version), now,
+                  _clip(charge_point_serial_number), _clip(charge_box_serial_number),
+                  _clip(meter_serial_number), _clip(meter_type),
+                  _clip(iccid), _clip(imsi),
+                  HEARTBEAT_INTERVAL, self._connected_at, self._remote_address))
 
         logger.info("[%s] Boot: vendor=%s  model=%s  firmware=%s",
                     self._cp_id, charge_point_vendor, charge_point_model, firmware_version)
 
         return call_result.BootNotificationPayload(
             current_time=now,
-            interval=30,
+            interval=HEARTBEAT_INTERVAL,
             status=RegistrationStatus.accepted,
         )
 
@@ -260,9 +331,28 @@ class ChargePoint(CP):
         connector_id: int,
         error_code: str,
         status: str,
+        info: str | None = None,
+        timestamp: str | None = None,
+        vendor_error_code: str | None = None,
         **kwargs,
     ):
-        """Log connector status changes – no persistence required."""
+        """Log the status change and keep the latest state per connector."""
         logger.info("[%s] Status: connector=%d  status=%s  error=%s",
                     self._cp_id, connector_id, status, error_code)
+        now = datetime.now(timezone.utc).isoformat()
+        with db() as conn:
+            conn.cursor().execute("""
+                INSERT INTO connector_status
+                    (charge_point_id, connector_id, status, error_code, info,
+                     vendor_error_code, status_timestamp, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (charge_point_id, connector_id) DO UPDATE SET
+                    status            = EXCLUDED.status,
+                    error_code        = EXCLUDED.error_code,
+                    info              = EXCLUDED.info,
+                    vendor_error_code = EXCLUDED.vendor_error_code,
+                    status_timestamp  = EXCLUDED.status_timestamp,
+                    updated_at        = EXCLUDED.updated_at
+            """, (self._cp_id, connector_id, _clip(status), _clip(error_code),
+                  _clip(info), _clip(vendor_error_code), _clip(timestamp), now))
         return call_result.StatusNotificationPayload()

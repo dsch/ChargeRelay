@@ -31,6 +31,11 @@
           :class="{ 'tab-btn--active': activeTab === 'reports' }"
           @click="$emit('toReports')"
         >{{ t('nav.reports') }}</button>
+        <button
+          class="tab-btn"
+          :class="{ 'tab-btn--active': activeTab === 'stations' }"
+          @click="$emit('toStations')"
+        >{{ t('nav.stations') }}</button>
       </nav>
 
       <div class="topbar__right">
@@ -104,6 +109,17 @@
       </svg>
       <span class="bottom-nav__label">{{ t('nav.reports') }}</span>
     </button>
+    <button
+      class="bottom-nav__item"
+      :class="{ 'bottom-nav__item--active': activeTab === 'stations' }"
+      @click="$emit('toStations')"
+    >
+      <svg class="bottom-nav__icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect x="6" y="3" width="12" height="18" rx="2" stroke="currentColor" stroke-width="1.8"/>
+        <path d="M13 7l-3 5h4l-3 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="bottom-nav__label">{{ t('nav.stations') }}</span>
+    </button>
   </nav>
 </template>
 
@@ -113,16 +129,17 @@ import { LOCALES } from '~/composables/useLocale'
 const { t, locale, setLocale } = useLocale()
 
 defineProps<{
-  activeTab: 'overview' | 'sessions' | 'vehicles' | 'reports'
+  activeTab: 'overview' | 'sessions' | 'vehicles' | 'reports' | 'stations'
   loading: boolean
 }>()
 
 defineEmits<{
-  'update:activeTab': ['overview' | 'sessions' | 'vehicles' | 'reports']
+  'update:activeTab': ['overview' | 'sessions' | 'vehicles' | 'reports' | 'stations']
   refresh: []
   toSessions: []
   toVehicles: []
   toReports: []
+  toStations: []
 }>()
 </script>
 
@@ -173,7 +190,7 @@ defineEmits<{
   bottom: 0;
   z-index: 100;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 0.15rem;
   padding: 0.35rem 0.4rem calc(0.35rem + env(safe-area-inset-bottom));
   background: rgba(255, 255, 255, 0.92);

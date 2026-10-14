@@ -27,6 +27,13 @@ Most home and fleet charging stations ship with a vendor cloud app that locks yo
 - Automatic vehicle identification via RFID tag
 - Manual vehicle assignment directly from the live card
 
+### Stations
+- Per-station overview: online/offline state, firmware version, vendor and model
+- Per-connector status (Available, Charging, Faulted …) with error code and info
+- Hardware identity reported at boot: serial numbers, meter type, ICCID/IMSI
+- Connection details: last seen, connected since, remote address, heartbeat interval
+- Usage per station: active sessions, sessions and kWh of the last 30 days, total kWh
+
 ### Session History
 - Paginated log of all completed and active sessions
 - Shows vehicle, charge point, connector, start/end time, energy (kWh)

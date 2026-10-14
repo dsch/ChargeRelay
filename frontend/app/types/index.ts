@@ -67,6 +67,52 @@ export interface Report {
   deliveries: ReportDelivery[]
 }
 
+export interface StationConnector {
+  connector_id: number
+  status: string | null
+  error_code: string | null
+  info: string | null
+  vendor_error_code: string | null
+  status_timestamp: string | null
+  updated_at: string | null
+  active_session: {
+    session_id: number
+    vehicle_name: string | null
+    duration_seconds: number | null
+    session_energy_kwh: number | null
+    latest_meter_values: MeterValue[]
+  } | null
+}
+
+export interface StationStats {
+  sessions_30d: number
+  kwh_30d: number
+  kwh_total: number
+  last_session_start: string | null
+  active_sessions: number
+}
+
+export interface Station {
+  id: string
+  vendor: string | null
+  model: string | null
+  firmware: string | null
+  serial_number: string | null
+  box_serial_number: string | null
+  meter_serial_number: string | null
+  meter_type: string | null
+  iccid: string | null
+  imsi: string | null
+  heartbeat_interval: number | null
+  connected_at: string | null
+  remote_address: string | null
+  last_seen: string | null
+  last_seen_seconds: number | null
+  online: boolean
+  connectors: StationConnector[]
+  stats: StationStats
+}
+
 export interface Stats {
   days: number
   energy_per_day: { date: string; kwh: number }[]
