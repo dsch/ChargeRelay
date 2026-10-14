@@ -92,6 +92,28 @@ export interface StationStats {
   active_sessions: number
 }
 
+export interface FirmwareFile {
+  id: number
+  filename: string
+  size_bytes: number
+  sha256: string
+  note: string | null
+  uploaded_at: string
+}
+
+export interface FirmwareUpdate {
+  id: number
+  charge_point_id: string
+  filename: string
+  status: string
+  detail: string | null
+  from_version: string | null
+  to_version: string | null
+  requested_at: string
+  sent_at: string | null
+  updated_at: string
+}
+
 export interface Station {
   id: string
   vendor: string | null
@@ -110,6 +132,7 @@ export interface Station {
   last_seen_seconds: number | null
   online: boolean
   connectors: StationConnector[]
+  firmware_update: FirmwareUpdate | null
   stats: StationStats
 }
 

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as CP
-from ocpp.v16 import call_result
+from ocpp.v16 import call, call_result
 from ocpp.v16.enums import Action, AuthorizationStatus, RegistrationStatus
 
 from database import db
@@ -23,6 +23,18 @@ logger = logging.getLogger("ocpp-server")
 # The forwarder is injected by main.py after startup so that both modules
 # can import without circular dependencies.
 forwarder = None
+
+# Live connections by charge point id.  Only this process holds the charger
+# websockets, so commands (e.g. UpdateFirmware) must be sent from here.
+connected: dict[str, "ChargePoint"] = {}
+
+# firmware_updates.status values.  "queued"/"sent"/"failed" are set by the API
+# and the dispatcher; the rest are OCPP 1.6 FirmwareStatus values.
+FW_REPORTED_STATUSES = (
+    "Downloading", "Downloaded", "DownloadFailed",
+    "Installing", "Installed", "InstallationFailed",
+)
+FW_TERMINAL_STATUSES = ("Installed", "DownloadFailed", "InstallationFailed", "failed")
 
 # Heartbeat interval (seconds) announced to charge points in BootNotification.
 # The API derives the online/offline state from it, so both must agree.
@@ -95,6 +107,52 @@ class ChargePoint(CP):
             logger.warning("[%s] last_seen update failed: %s", self._cp_id, exc)
 
     # -----------------------------------------------------------------------
+    # Commands sent to the station
+    # -----------------------------------------------------------------------
+
+    async def send_update_firmware(
+        self, location: str, retries: int = 3, retry_interval: int = 60
+    ) -> None:
+        """Send UpdateFirmware (start now).
+
+        OCPP 1.6 answers with an empty CallResult, so returning normally means
+        the station accepted the request.  suppress=False makes a CallError
+        raise instead of being swallowed by the library.
+        """
+        await self.call(
+            call.UpdateFirmwarePayload(
+                location=location,
+                retrieve_date=datetime.now(timezone.utc).isoformat(),
+                retries=retries,
+                retry_interval=retry_interval,
+            ),
+            suppress=False,
+        )
+
+    # -----------------------------------------------------------------------
+    # FirmwareStatusNotification
+    # -----------------------------------------------------------------------
+
+    @on(Action.FirmwareStatusNotification)
+    async def on_firmware_status_notification(self, status: str, **kwargs):
+        """Advance the station's newest unfinished firmware update."""
+        status = _clip(status)
+        logger.info("[%s] FirmwareStatus: %s", self._cp_id, status)
+        if status in FW_REPORTED_STATUSES:
+            with db() as conn:
+                conn.cursor().execute("""
+                    UPDATE firmware_updates
+                    SET status = %s, updated_at = %s
+                    WHERE id = (
+                        SELECT id FROM firmware_updates
+                        WHERE charge_point_id = %s AND status NOT IN %s
+                        ORDER BY id DESC LIMIT 1
+                    )
+                """, (status, datetime.now(timezone.utc).isoformat(),
+                      self._cp_id, FW_TERMINAL_STATUSES))
+        return call_result.FirmwareStatusNotificationPayload()
+
+    # -----------------------------------------------------------------------
     # BootNotification
     # -----------------------------------------------------------------------
 
@@ -143,6 +201,21 @@ class ChargePoint(CP):
                   _clip(meter_serial_number), _clip(meter_type),
                   _clip(iccid), _clip(imsi),
                   HEARTBEAT_INTERVAL, self._connected_at, self._remote_address))
+
+            # A reboot that reports a different firmware version than the one
+            # recorded when the update was requested is the real success signal
+            # – some chargers never send FirmwareStatus "Installed".
+            cur.execute("""
+                UPDATE firmware_updates
+                SET status = 'Installed', to_version = %s, updated_at = %s
+                WHERE id = (
+                    SELECT id FROM firmware_updates
+                    WHERE charge_point_id = %s
+                      AND status IN ('sent', 'Downloading', 'Downloaded', 'Installing')
+                      AND from_version IS DISTINCT FROM %s
+                    ORDER BY id DESC LIMIT 1
+                )
+            """, (_clip(firmware_version), now, self._cp_id, _clip(firmware_version)))
 
         logger.info("[%s] Boot: vendor=%s  model=%s  firmware=%s",
                     self._cp_id, charge_point_vendor, charge_point_model, firmware_version)

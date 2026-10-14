@@ -71,8 +71,28 @@
 
     <!-- ── Stationen ───────────────────────────────────────────────────── -->
     <template v-if="activeTab === 'stations'">
-      <StationsSection :loading="stationsLoading" :stations="stations" />
+      <StationsSection
+        :loading="stationsLoading"
+        :stations="stations"
+        :files="firmwareFiles"
+        :uploadPercent="uploadPercent"
+        :panelError="firmwarePanelError"
+        @updateFirmware="openFirmwareModal"
+        @uploadFile="uploadFirmwareFile"
+        @deleteFile="deleteFirmwareFile"
+      />
     </template>
+
+    <!-- ── Firmware-Update (Modal) ─────────────────────────────────────── -->
+    <FirmwareModal
+      v-if="firmwareStation"
+      :station="firmwareStation"
+      :files="firmwareFiles"
+      :saving="firmwareSaving"
+      :error="firmwareError"
+      @close="firmwareStation = null"
+      @start="startFirmwareUpdate"
+    />
 
     <!-- ── Fahrzeug-Formular (Modal) ───────────────────────────────────── -->
     <VehicleFormModal
@@ -110,7 +130,9 @@
 </template>
 
 <script setup lang="ts">
-import type { Vehicle, ActiveSession, Session, Report, Stats, Station } from '~/types'
+import type { Vehicle, ActiveSession, Session, Report, Stats, Station, FirmwareFile } from '~/types'
+
+const { t } = useLocale()
 
 const API = ''
 
@@ -174,6 +196,19 @@ const editingReport = ref<Report | null>(null)
 const stations = ref<Station[]>([])
 const stationsLoading = ref(false)
 
+const firmwareFiles = ref<FirmwareFile[]>([])
+const uploadPercent = ref<number | null>(null)
+const firmwarePanelError = ref('')
+const firmwareStation = ref<Station | null>(null)
+const firmwareSaving = ref(false)
+const firmwareError = ref('')
+
+// Same terminal states as the backend; anything else means "still running".
+const FW_TERMINAL = new Set(['Installed', 'DownloadFailed', 'InstallationFailed', 'failed'])
+const firmwareRunning = computed(() =>
+  stations.value.some(s => s.firmware_update && !FW_TERMINAL.has(s.firmware_update.status))
+)
+
 const stats = ref<Stats | null>(null)
 const statsLoading = ref(true)   // true = zeigt Loading-Zustand beim ersten Rendern
 const statsError = ref(false)
@@ -210,6 +245,89 @@ async function fetchStations() {
     stations.value = await $fetch<Station[]>(`${API}/api/stations`)
   } catch { stations.value = [] }
   finally { stationsLoading.value = false }
+}
+
+async function fetchFirmwareFiles() {
+  try {
+    firmwareFiles.value = await $fetch<FirmwareFile[]>(`${API}/api/firmware/files`)
+  } catch { firmwareFiles.value = [] }
+}
+
+// ── Firmware ───────────────────────────────────────────────────────────────
+
+/** Translate an API error status into a message the user can act on. */
+function firmwareErrorMessage(status: number | undefined, detail: string | undefined): string {
+  switch (status) {
+    case 503: return t('firmware.errorDisabled')
+    case 413: return t('firmware.errorTooLarge')
+    case 409: return t('firmware.errorConflict', { detail: detail ?? '' })
+    default:  return t('firmware.errorGeneric')
+  }
+}
+
+function uploadFirmwareFile({ file, note }: { file: File; note: string }) {
+  firmwarePanelError.value = ''
+  uploadPercent.value = 0
+
+  const params = new URLSearchParams({ filename: file.name })
+  if (note) params.set('note', note)
+
+  // XMLHttpRequest: fetch() cannot report upload progress.
+  const xhr = new XMLHttpRequest()
+  xhr.open('POST', `${API}/api/firmware/files?${params}`)
+  xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) uploadPercent.value = Math.round((e.loaded / e.total) * 100)
+  }
+  xhr.onload = async () => {
+    uploadPercent.value = null
+    if (xhr.status === 201) {
+      await fetchFirmwareFiles()
+    } else {
+      let detail: string | undefined
+      try { detail = JSON.parse(xhr.responseText)?.detail } catch { /* not JSON */ }
+      firmwarePanelError.value = firmwareErrorMessage(xhr.status, detail)
+    }
+  }
+  xhr.onerror = () => {
+    uploadPercent.value = null
+    firmwarePanelError.value = t('firmware.errorGeneric')
+  }
+  xhr.send(file)
+}
+
+async function deleteFirmwareFile(f: FirmwareFile) {
+  if (!confirm(t('firmware.deleteConfirm', { name: f.filename }))) return
+  firmwarePanelError.value = ''
+  try {
+    await $fetch(`${API}/api/firmware/files/${f.id}`, { method: 'DELETE' })
+    await fetchFirmwareFiles()
+  } catch (e: any) {
+    firmwarePanelError.value = firmwareErrorMessage(e?.response?.status, e?.data?.detail)
+  }
+}
+
+function openFirmwareModal(s: Station) {
+  firmwareError.value = ''
+  firmwareStation.value = s
+}
+
+async function startFirmwareUpdate({ fileId }: { fileId: number }) {
+  if (!firmwareStation.value) return
+  firmwareSaving.value = true
+  firmwareError.value = ''
+  try {
+    await $fetch(`${API}/api/firmware/updates`, {
+      method: 'POST',
+      body: { charge_point_id: firmwareStation.value.id, file_id: fileId },
+    })
+    firmwareStation.value = null
+    await fetchStations()
+  } catch (e: any) {
+    firmwareError.value = firmwareErrorMessage(e?.response?.status, e?.data?.detail)
+  } finally {
+    firmwareSaving.value = false
+  }
 }
 
 async function fetchStats() {
@@ -284,7 +402,7 @@ async function switchToReports() {
 
 async function switchToStations() {
   activeTab.value = 'stations'
-  await fetchStations()
+  await Promise.all([fetchStations(), fetchFirmwareFiles()])
 }
 
 // ── Fahrzeug-CRUD ──────────────────────────────────────────────────────────
@@ -437,12 +555,17 @@ onMounted(async () => {
 const interval = setInterval(refresh, 90_000)
 // Station online state flips after ~90 s without a frame, so poll faster while
 // that tab is visible.
+// While a firmware update is running, poll every 5 s so progress is visible.
 const stationsInterval = setInterval(() => {
   if (authenticated.value && activeTab.value === 'stations') fetchStations()
 }, 30_000)
+const firmwareInterval = setInterval(() => {
+  if (authenticated.value && activeTab.value === 'stations' && firmwareRunning.value) fetchStations()
+}, 5_000)
 onUnmounted(() => {
   clearInterval(interval)
   clearInterval(stationsInterval)
+  clearInterval(firmwareInterval)
 })
 </script>
 

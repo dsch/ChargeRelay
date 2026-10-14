@@ -33,6 +33,7 @@ Most home and fleet charging stations ship with a vendor cloud app that locks yo
 - Hardware identity reported at boot: serial numbers, meter type, ICCID/IMSI
 - Connection details: last seen, connected since, remote address, heartbeat interval
 - Usage per station: active sessions, sessions and kWh of the last 30 days, total kWh
+- **Firmware update** — upload a firmware file in the UI, ChargeRelay hosts it and sends an OCPP `UpdateFirmware` to the station; progress (downloading, installing, installed) is shown on the station card. See [Firmware Updates](#firmware-updates)
 
 ### Session History
 - Paginated log of all completed and active sessions
@@ -201,6 +202,12 @@ COMPOSE_PROFILES=local-db
 # Leave empty to disable the login screen entirely (e.g. on a private LAN).
 UI_PASSWORD=
 
+# ── Firmware update ───────────────────────────────────────────────────────────
+
+# FW_PUBLIC_BASE_URL = address the charger can reach.
+FW_PUBLIC_BASE_URL=
+FW_MAX_UPLOAD_MB=100
+
 # ── Default UI language ───────────────────────────────────────────────────────
 
 # "de" (German) or "en" (English). Users can switch language in the UI.
@@ -215,6 +222,36 @@ SMTP_USER=user@example.com
 SMTP_PASSWORD=change-me
 SMTP_FROM=ocpp-reports@example.com
 ```
+
+---
+
+## Firmware Updates
+
+The **Stations** tab can push a firmware image to a charger using the OCPP 1.6 `UpdateFirmware` message.
+
+**Setup** (in `.env`):
+
+```env
+FW_PUBLIC_BASE_URL=http://192.168.1.16:3000   # an address the CHARGER can reach
+FW_MAX_UPLOAD_MB=100
+```
+
+`FW_PUBLIC_BASE_URL` is the address the charger uses to download the file, so it must be reachable from the charger's network (behind a reverse proxy, use the public URL). Uploaded files are stored in the `firmware_data` Docker volume.
+
+**Flow**
+
+1. Stations tab → **Firmware files** → upload the image (compare the shown SHA-256 with the manufacturer's value).
+2. On the station card click **Update firmware**, pick the file and confirm.
+3. The station downloads and installs the file; the card shows the status. An update counts as finished when the station reports `Installed` or reboots with a different firmware version.
+
+**Limits and cautions**
+
+- A wrong or damaged image can permanently disable a charger. OCPP 1.6 has no signature or hash check, so test on a non-critical charger first.
+- Firmware upload, delete and update have **no authentication**, like the rest of the API: anyone who can reach the API or the web UI can flash a charger. Keep ChargeRelay on a trusted network or behind an authenticating reverse proxy.
+- Updates are refused while the station is offline, has an active charging session, or already has an update running.
+- Chargers differ: some only accept `https://` or `ftp://` URLs, some ignore the scheduled time, and some never send `Installed`. If your charger needs HTTPS, put ChargeRelay behind a TLS reverse proxy.
+- The download link contains a random token and needs no password (the charger cannot send one). Deleting the file revokes the link.
+- An update with no final status after 2 hours is marked as failed.
 
 ---
 

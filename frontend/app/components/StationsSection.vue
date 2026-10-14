@@ -2,6 +2,47 @@
   <section class="stations-section">
     <div class="section-header">
       <h2 class="section-title">{{ t('stations.title') }}</h2>
+      <button class="btn btn--sm btn--ghost" @click="filesOpen = !filesOpen">
+        {{ t('firmware.filesTitle') }} ({{ files.length }})
+      </button>
+    </div>
+
+    <!-- Firmware files: upload, list, delete -->
+    <div v-if="filesOpen" class="fw-panel">
+      <div class="fw-panel__upload">
+        <input
+          v-model="note"
+          class="form-input"
+          type="text"
+          maxlength="200"
+          :placeholder="t('firmware.notePlaceholder')"
+          :aria-label="t('firmware.note')"
+          :disabled="uploadPercent !== null"
+        >
+        <label class="btn btn--primary btn--sm" :class="{ 'is-disabled': uploadPercent !== null }">
+          {{ uploadPercent !== null ? t('firmware.uploading', { percent: uploadPercent }) : t('firmware.upload') }}
+          <input type="file" class="sr-only" :disabled="uploadPercent !== null" @change="onPickFile">
+        </label>
+      </div>
+      <p v-if="panelError" class="fw-error" role="alert">{{ panelError }}</p>
+
+      <div v-if="files.length === 0" class="muted small">{{ t('firmware.noFiles') }}</div>
+      <div v-else class="fw-files">
+        <div v-for="f in files" :key="f.id" class="fw-file">
+          <div class="fw-file__main">
+            <span class="fw-file__name">{{ f.filename }}</span>
+            <span class="muted small">{{ formatSize(f.size_bytes) }} · {{ formatDate(f.uploaded_at) }}</span>
+            <span v-if="f.note" class="muted small">{{ f.note }}</span>
+            <span class="fw-file__hash mono" :title="f.sha256">{{ t('firmware.sha256') }}: {{ f.sha256 }}</span>
+          </div>
+          <div class="fw-file__actions">
+            <button class="btn btn--sm btn--ghost" @click="copyHash(f)">
+              {{ copiedId === f.id ? t('firmware.copied') : t('firmware.copy') }}
+            </button>
+            <button class="btn btn--sm btn--danger" @click="$emit('deleteFile', f)">{{ t('firmware.delete') }}</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div v-if="loading && stations.length === 0" class="loading-hint">{{ t('stations.loading') }}</div>
@@ -29,6 +70,27 @@
             </span>
           </div>
         </header>
+
+        <!-- Firmware update -->
+        <div class="station-card__section">
+          <span class="station-card__label">{{ t('stations.firmware') }}</span>
+          <div class="fw-row">
+            <span class="mono">{{ s.firmware || '–' }}</span>
+            <span v-if="s.firmware_update" class="chip" :class="updateClass(s.firmware_update.status)">
+              {{ updateLabel(s.firmware_update.status) }}
+            </span>
+            <span v-if="s.firmware_update" class="muted small">
+              {{ s.firmware_update.filename }}<template v-if="s.firmware_update.to_version"> · {{ t('firmware.versionChange', { from: s.firmware_update.from_version || '–', to: s.firmware_update.to_version }) }}</template>
+            </span>
+            <button
+              class="btn btn--sm btn--ghost fw-row__btn"
+              :disabled="!!blockReason(s)"
+              :title="blockReason(s)"
+              @click="$emit('updateFirmware', s)"
+            >{{ t('firmware.update') }}</button>
+          </div>
+          <div v-if="s.firmware_update?.detail" class="fw-detail">{{ s.firmware_update.detail }}</div>
+        </div>
 
         <!-- Connectors -->
         <div class="station-card__section">
@@ -145,15 +207,78 @@
 </template>
 
 <script setup lang="ts">
-import type { Station, StationConnector } from '~/types'
+import type { FirmwareFile, Station, StationConnector } from '~/types'
 
 defineProps<{
   loading: boolean
   stations: Station[]
+  files: FirmwareFile[]
+  uploadPercent: number | null
+  panelError: string
+}>()
+
+const emit = defineEmits<{
+  updateFirmware: [station: Station]
+  uploadFile: [payload: { file: File; note: string }]
+  deleteFile: [file: FirmwareFile]
 }>()
 
 const { t, numLocale } = useLocale()
 const { formatDate, formatDuration, formatPower } = useFormatters()
+
+const filesOpen = ref(false)
+const note = ref('')
+const copiedId = ref<number | null>(null)
+
+// Statuses after which no further change is expected (mirrors the backend).
+const TERMINAL = new Set(['Installed', 'DownloadFailed', 'InstallationFailed', 'failed'])
+
+function onPickFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (file) {
+    emit('uploadFile', { file, note: note.value.trim() })
+    note.value = ''
+  }
+  input.value = ''   // allow picking the same file again
+}
+
+async function copyHash(f: FirmwareFile) {
+  try {
+    await navigator.clipboard.writeText(f.sha256)
+    copiedId.value = f.id
+    setTimeout(() => { if (copiedId.value === f.id) copiedId.value = null }, 1500)
+  } catch { /* clipboard unavailable (e.g. plain HTTP) – the hash is selectable text */ }
+}
+
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} kB`
+  return `${bytes} B`
+}
+
+const KNOWN_UPDATE_STATUS = new Set([
+  'queued', 'sending', 'sent', 'Downloading', 'Downloaded', 'Installing',
+  'Installed', 'DownloadFailed', 'InstallationFailed', 'failed',
+])
+
+function updateLabel(status: string): string {
+  return KNOWN_UPDATE_STATUS.has(status) ? t(`firmware.status.${status}`) : status
+}
+
+function updateClass(status: string): string {
+  if (status === 'Installed') return 'chip--ok'
+  if (status === 'failed' || status === 'DownloadFailed' || status === 'InstallationFailed') return 'chip--fault'
+  return 'chip--warn'
+}
+
+/** Why the Update button is disabled, or '' when an update can be started. */
+function blockReason(s: Station): string {
+  if (s.firmware_update && !TERMINAL.has(s.firmware_update.status)) return t('firmware.disabledRunning')
+  if (!s.online) return t('firmware.disabledOffline')
+  if (s.stats.active_sessions > 0) return t('firmware.disabledCharging')
+  return ''
+}
 
 // OCPP 1.6 ChargePointStatus values that have a translation and a colour.
 const KNOWN_STATUS = new Set([
@@ -247,6 +372,40 @@ function ago(secs: number | null): string {
   color: var(--text-muted);
   word-break: break-all;
 }
+
+/* Firmware */
+.fw-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.fw-panel__upload { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.fw-panel__upload .form-input { flex: 1 1 220px; }
+.is-disabled { opacity: 0.5; pointer-events: none; }
+.fw-error { color: var(--danger); font-size: 0.85rem; font-weight: 600; }
+.fw-files { display: flex; flex-direction: column; gap: 0.5rem; }
+.fw-file {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  background: var(--bg-card-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.8rem;
+}
+.fw-file__main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 260px; }
+.fw-file__name { font-weight: 600; font-size: 0.875rem; word-break: break-all; }
+.fw-file__hash { font-size: 0.7rem; color: var(--text-muted); word-break: break-all; }
+.fw-file__actions { display: flex; gap: 0.4rem; align-items: flex-start; }
+.fw-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.fw-row__btn { margin-left: auto; }
+.fw-detail { font-size: 0.8rem; color: var(--danger); word-break: break-word; }
 
 .station-card__section { display: flex; flex-direction: column; gap: 0.5rem; }
 .station-card__label {

@@ -183,6 +183,51 @@ def init_db() -> None:
             )
         """)
 
+        # Firmware images uploaded through the UI and hosted by the API.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS firmware_files (
+                id          SERIAL PRIMARY KEY,
+                token       TEXT    NOT NULL UNIQUE,
+                filename    TEXT    NOT NULL,
+                size_bytes  BIGINT  NOT NULL,
+                sha256      TEXT    NOT NULL,
+                note        TEXT,
+                uploaded_at TEXT    NOT NULL
+            )
+        """)
+
+        # One row per UpdateFirmware request (queued by the API, sent by the
+        # OCPP server, then advanced by FirmwareStatusNotification frames).
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS firmware_updates (
+                id              SERIAL PRIMARY KEY,
+                charge_point_id TEXT    NOT NULL,
+                file_id         INTEGER REFERENCES firmware_files(id) ON DELETE SET NULL,
+                location        TEXT    NOT NULL,
+                filename        TEXT    NOT NULL,
+                status          TEXT    NOT NULL,
+                detail          TEXT,
+                from_version    TEXT,
+                to_version      TEXT,
+                requested_at    TEXT    NOT NULL,
+                requested_from  TEXT,
+                sent_at         TEXT,
+                updated_at      TEXT    NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS firmware_updates_cp_idx
+            ON firmware_updates (charge_point_id, id DESC)
+        """)
+        # At most one unfinished update per station, enforced by the database so
+        # two simultaneous API requests cannot both slip past a check-then-insert.
+        # Keep the list in sync with FW_TERMINAL_STATUSES in charge_point.py.
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS firmware_updates_one_active_idx
+            ON firmware_updates (charge_point_id)
+            WHERE status NOT IN ('Installed', 'DownloadFailed', 'InstallationFailed', 'failed')
+        """)
+
         # Migration: add last_sent for mail delivery tracking.
         cur.execute("""
             ALTER TABLE report_deliveries

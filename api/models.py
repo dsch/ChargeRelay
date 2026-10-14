@@ -6,7 +6,7 @@ All input validation lives here so routers stay thin and readable.
 """
 from typing import Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Allowed values
@@ -68,6 +68,12 @@ class DeliveryIn(BaseModel):
         if v is not None and v not in MAIL_INTERVALS:
             raise ValueError(f"interval must be one of: {', '.join(sorted(MAIL_INTERVALS))}")
         return v
+
+
+class FirmwareUpdateCreate(BaseModel):
+    """Payload for starting a firmware update on one station."""
+    charge_point_id: str = Field(min_length=1, max_length=100)
+    file_id: int
 
 
 class ReportCreate(BaseModel):

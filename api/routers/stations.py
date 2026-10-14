@@ -91,6 +91,16 @@ def get_stations():
             for r in cur.fetchall()
         }
 
+        # Newest firmware update per station (progress shown on the card).
+        cur.execute("""
+            SELECT DISTINCT ON (charge_point_id)
+                   id, charge_point_id, filename, status, detail,
+                   from_version, to_version, requested_at, sent_at, updated_at
+            FROM firmware_updates
+            ORDER BY charge_point_id, id DESC
+        """)
+        fw_update_by_cp = {r[1]: row_to_dict(cur, r) for r in cur.fetchall()}
+
     result = []
     for st in stations:
         cp_id = st["id"]
@@ -125,6 +135,7 @@ def get_stations():
             }
 
         st["connectors"] = connectors
+        st["firmware_update"] = fw_update_by_cp.get(cp_id)
         st["stats"] = {
             "sessions_30d": 0, "kwh_30d": 0.0, "kwh_total": 0.0,
             "last_session_start": None,

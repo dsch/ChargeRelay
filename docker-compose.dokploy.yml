@@ -13,6 +13,8 @@ services:
   ocpp-api:
     build: ./api
     env_file: .env
+    volumes:
+      - firmware_data:/data/firmware
     depends_on:
       postgres:
         condition: service_healthy
@@ -54,6 +56,7 @@ services:
 
 volumes:
   postgres_data:
+  firmware_data:
 
 networks:
   dokploy-network:

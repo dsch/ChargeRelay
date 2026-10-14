@@ -13,6 +13,7 @@ import websockets
 import charge_point as cp_module
 from charge_point import ChargePoint
 from database import DSN, init_db
+from firmware_dispatcher import FirmwareDispatcher
 from ocpp_forwarder import OcppForwarder
 from report_mailer import ReportMailer
 
@@ -45,12 +46,17 @@ async def on_connect(websocket, path: str) -> None:
     logger.info("Charge point connected: id=%s  remote=%s", cp_id, websocket.remote_address)
 
     cp = ChargePoint(cp_id, websocket)
+    cp_module.connected[cp_id] = cp
     try:
         await cp.start()
     except websockets.exceptions.ConnectionClosedOK:
         logger.info("Charge point disconnected cleanly: id=%s", cp_id)
     except Exception as exc:
         logger.error("Charge point %s error: %s", cp_id, exc)
+    finally:
+        # A reconnect may already have replaced this entry – only remove our own.
+        if cp_module.connected.get(cp_id) is cp:
+            del cp_module.connected[cp_id]
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +76,10 @@ async def main() -> None:
     # Start the e-mail report scheduler as a fire-and-forget background task.
     mailer = ReportMailer(DSN)
     asyncio.create_task(mailer.run())
+
+    # Send firmware updates queued by the API to the connected stations.
+    dispatcher = FirmwareDispatcher(DSN)
+    asyncio.create_task(dispatcher.run())
 
     logger.info("OCPP 1.6 server listening on ws://%s:%d", HOST, PORT)
     async with websockets.serve(
